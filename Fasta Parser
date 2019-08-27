@@ -1,0 +1,174 @@
+######################################################################
+'''
+BINF 6410 Bioinformatics Programming Assignment 3
+process_fasta_PhyllisLam.py 
+
+The following program allows the user to parse through sequences in
+FASTA format to identify and trim primer regions from the sequence.
+The program outputs a FASTA file containing unprocessed reads, a FASTA
+file of trimmed sequences and a log.txt file to track metrics of the
+program upon completion.
+'''
+
+#####################################################################
+import argparse
+import sys
+
+#create a dictionary for reverse complement of reverse primer 
+complement = {"A":"T", "T":"A", "C":"G", "G":"C", "N":"N"}
+
+#Define a function to find the first occurence from the beginning or end of a sequence, with n mismatches and M and N ambiguous nucleotides (wildcards)
+def find_substring(sub_seq,sequence,n_mismatch, mpos, num_wildcard, from_front = True,max_iter=30):
+    #Initialize from which direction to begin parsing
+    if from_front:
+        left = 0
+        right = len(sub_seq)
+        inc = 1
+    else:
+        left = len(sequence) - len(sub_seq)
+        right = len(sequence)
+        inc = -1
+    #Iterate through a maximum number of iterations or the length of the sequence
+    for i in range(min(max_iter, len(sequence)-len(sub_seq))):
+        diff = hamming2(sub_seq,sequence[left:right])
+        if diff <= n_mismatch:
+            return sequence[left:right]
+        if diff <= n_mismatch + num_wildcard:
+            extra_mismatch = 0
+            for m in mpos:
+                if sequence[m] == 'T' or sequence[m] == 'G':
+                    extra_mismatch = extra_mismatch + 1
+            if diff <= n_mismatch + num_wildcard - extra_mismatch:
+                return sequence[left:right]
+        left = left + inc
+        right = right + inc
+    return ""
+
+
+#Define function for calculating Hamming distance for mismatches 
+#Lifted from Stack Overflow (https://stackoverflow.com/questions/31007054/hamming-distance-between-two-binary-strings-not-working) 
+def hamming2(s1, s2): 
+    assert len(s1) == len(s2)
+    return sum(c1 != c2 for c1, c2 in zip(s1, s2))
+
+#List of input arguments for the program
+def parse (arg_lst):
+    parser = argparse.ArgumentParser(description='Process a FASTA file and remove the desired sequences')
+    parser.add_argument('-in_file', nargs = 1, required=True, help="The input file name.")
+    parser.add_argument('-out_file',nargs = 1, required=True, help="The output file name for processed reads.")
+    parser.add_argument('-unk_file', nargs = 1, required=True, help="The output file name for unprocessed reads.")
+    parser.add_argument('-n_mismatch', nargs=1, required=True, help="The number of mismatches permitted.",type=int)
+    parser.add_argument('-min_len', nargs=1, required=True, help="The minimum length for a sequence to be processed",type=int)
+    parser.add_argument('-forward', nargs=1, required=False, default="GTGCCAGCMGCCGCGGTAA", help= "The forward sequence for the primer")
+    parser.add_argument('-reverse', nargs=1, required = False, default="ACAGCCATGCANCACCT", help = "The reverse sequence for the primer")
+    parser.add_argument('-max_iter', nargs=1, required = False, default=30, type = int, help = "The number of bases that will be searched from the beginning or the end of the sequence")
+    return parser.parse_args(arg_lst[1:])
+
+#Check to make sure inputs are correct
+def arg_check(args):
+    pass
+    
+#Define the main function in the program for parsing, identifying and trimming of primer sequences 
+def main():
+    args = parse(sys.argv)
+    arg_check(args)
+
+    in_file = args.in_file[0]
+    out_file = args.out_file[0]
+    unk_file = args.unk_file[0]
+    min_len = args.min_len[0]
+    max_iter = args.max_iter
+    n_mismatch = args.n_mismatch[0]
+    forward_sequence = args.forward[0]
+    #To reverse complement the reverse primer  sequence
+    reverse = reversed(args.reverse[0])
+    seq = []    
+    for s in reverse:
+        seq.append(complement[s])
+    reverse_sequence = "".join(seq)
+    #Open the files for writing
+    f_in = open(in_file, "r")
+    f_out = open(out_file, "w+")
+    f_unk = open(unk_file, "w+")
+    f_log = open(sys.argv[0] + "_log.txt", "w+")
+    #Read all lines from the input file and store them in lines.
+    lines = f_in.readlines()
+    f_in.close()
+    #Close the file once we're done with it
+
+    #Define process metrics that needs to be tracked
+    unprocessed_reads = [] #Identity of sequences that were not processed by the program
+    unprocessed_reasons = [] #Reason for sequence remaining unprocessed 
+    num_reads = 0 #Total number of reads fed through the program
+    num_trimmed_reads = 0 #Number of sequences processed 
+    avg_len_reads = 0 #Average length of sequence pre-processing 
+    avg_len_trimmed_reads = 0 #Average length of sequence post-processing 
+    line_count = 0
+
+    #To keep track of where the ambiguous nucleotide 'M' is
+    forward_mpos = [i for i, letter in enumerate(forward_sequence) if letter == 'M']
+    forward_wildcard = sum([(s =='N' or s == 'M') for s in forward_sequence ])
+    reverse_mpos = [i for i, letter in enumerate(reverse_sequence) if letter == 'M']
+    reverse_wildcard = sum([(s =='N' or s == 'M') for s in reverse_sequence ])
+
+    while line_count  < len(lines):
+        desc = lines[line_count] #The first line is always the sequence name
+        sequence = []
+        line_count = line_count + 1
+        while line_count < len(lines) and lines[line_count][0] != '>': #Until the next line is the end of the file or a description
+            sequence.append(lines[line_count].strip())
+            line_count = line_count + 1
+        sequence = "".join(sequence)
+        num_reads = num_reads + 1
+        #Finished reading out the line
+        avg_len_reads = avg_len_reads + len(sequence) 
+        #Here we start checking for disqualifying cases:
+        if len(sequence) < min_len:
+            #The sequence is too short, write to unprocessed and continue
+            f_unk.writelines([desc,sequence + "\n"])
+            unprocessed_reads.append(desc)
+            unprocessed_reasons.append("Sequence is too short.\n")
+            continue #ends loop, to keep going
+        #Try to find the primers
+        primer1 = find_substring(forward_sequence, sequence, n_mismatch, forward_mpos, forward_wildcard, from_front= True, max_iter = max_iter)
+        primer2 = find_substring(reverse_sequence, sequence,n_mismatch,reverse_mpos, reverse_wildcard, from_front= False,max_iter = max_iter)
+        
+        if primer1 =="" and primer2 =="":
+            #If neither primer can be found
+            f_unk.writelines([desc,sequence+ "\n"])
+            unprocessed_reads.append(desc)
+            unprocessed_reasons.append("Sequence has no primer regions starting in the first and last {} bases.\n".format(max_iter))
+            continue #Ends current iteration of loop
+
+        #Replace each of the found primers with the result. Note that if not found, this will do nothing!
+        sequence = sequence.replace(primer1, "")
+        sequence = sequence.replace(primer2, "")
+        #Update the metrics in log file
+        avg_len_trimmed_reads = avg_len_trimmed_reads + len(sequence)
+        num_trimmed_reads = num_trimmed_reads + 1
+        #Write out to file
+        f_out.writelines([desc,sequence+ "\n"])
+    
+    #Number will round down if decimal
+    if num_trimmed_reads >0:
+        avg_len_trimmed_reads = avg_len_trimmed_reads//num_trimmed_reads
+    avg_len_reads = avg_len_reads//num_reads
+
+    #Writing out the log:
+    log_lines = []
+    log_lines.append("Processed Reads = {}\n".format(num_reads))
+    log_lines.append("Trimmed Reads = {}\n".format(num_trimmed_reads))
+    log_lines.append("Average Read Length (Raw) = {}\n".format(avg_len_reads))
+    log_lines.append("Average Read Length (Trimmed) = {}\n".format(avg_len_trimmed_reads))
+    if len(unprocessed_reads) > 0:
+        log_lines.append("Unprocessed Read Reasons:\n")
+        for desc, rsn in zip(unprocessed_reads,unprocessed_reasons):
+            log_lines.append(desc)
+            log_lines.append(rsn)
+    f_log.writelines(log_lines)
+    f_out.close()
+    f_unk.close()
+    f_log.close()
+
+
+if __name__ == "__main__": main()
